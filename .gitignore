@@ -1,0 +1,19 @@
+# Data-processing pipeline: deliberately not published. The deployed app (index.html + data/)
+# needs none of this to run; the methodology it implements is documented in the PUSH-IT SMCA
+# scientific report, not here. See README.md's "Rights" section.
+scripts/
+
+# Local/editor cruft
+.DS_Store
+**/.DS_Store
+__pycache__/
+*.pyc
+
+# This repo's own pre-publish backup -- not meant to be pushed
+archive/
+
+# Input layers built during development but not shown in the app; their sources do not all
+# allow redistribution, so they must not be published
+data/natura2000_10km.topojson
+data/groundwater_protection_10km.topojson
+data/dhn_connection_10km.topojson

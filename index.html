@@ -1,0 +1,789 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PUSH-IT · UTES favourability</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+<style>
+  /* ==========================================================================================
+     2026-09-25: the 6 individual input-KPI layers (Energy demand, Target depth, Groundwater
+     flow, Population density, Reservoir quality, Thermal conductivity) were removed from the
+     public app entirely -- both the UI and their underlying data files -- after a data-license
+     check found one source (BGR IHME1500, used for Groundwater flow) restricts public
+     redistribution of derived products. Rather than litigate each of the 6 sources' terms
+     individually, all 6 were dropped; only the 4 favourability composites (transformed,
+     weighted blends, not a redistribution of any single source) and the 2 coverage diagnostics
+     (data-completeness counts, not source values) remain. The former "Favourability / Input
+     data" tab layout collapsed to a single list now that only one group of real layers exists;
+     Coverage stays as a disclosure link below it, unchanged. The legend is dynamic: each layer
+     has its own ramp type (favourability / categorical / sequential-neutral) and its
+     own value domain, computed from that layer's own data on first load. Layers lazy-load
+     (fetch only happens on first selection).
+     ========================================================================================== */
+  :root {
+    --bg: #f2f1ea;
+    --panel: #ffffff;
+    --panel-alt: #f7f6f0;
+    --line: #ded9c9;
+    --ink: #201f1a;
+    --ink-soft: #6b6656;
+    --accent: #ef5b22;       /* sampled from the real PUSH-IT logo */
+    --accent-tint: #fde6dc;
+    --accent-line: #f6b797;
+    --header-h: 60px;
+    --sidebar-w: 300px;
+    --footer-h: 64px;
+    --font-ui: "IBM Plex Sans", -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; font-family: var(--font-ui); color: var(--ink); background: var(--bg); }
+  /* Fixed body: the collapsed panel, pushed off-screen to the right, must not widen the page (phones). */
+  body { position: fixed; inset: 0; }
+  #map { position: absolute; inset: 0; }
+
+  /* -------------------------------------------------------------------------------------- Header */
+  .app-header {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 1000; height: var(--header-h);
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    padding: 0 1.1rem; display: flex; align-items: center; gap: 0.65rem;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+  }
+  .app-header img.brand-mark { height: 32px; width: auto; flex: none; }
+  .app-header h1 { font-size: 1rem; margin: 0; font-weight: 700; letter-spacing: -0.01em; }
+  .app-header .sub {
+    font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink-soft); margin-left: auto;
+    letter-spacing: 0.01em; white-space: nowrap;
+  }
+  .app-header img.partner-mark { height: 30px; width: auto; flex: none; margin-left: 0.9rem; }
+
+  /* -------------------------------------------------------------------------------------- Footer */
+  /* Attribution + the mandatory EU-funding disclaimer -- page-wide so it's always visible
+     regardless of sidebar/legend state, and out of the legend's way (2026-09-25, on request). */
+  .app-footer {
+    position: absolute; bottom: 0; left: 0; right: 0; z-index: 1000; min-height: var(--footer-h);
+    background: var(--panel); border-top: 1px solid var(--line);
+    padding: 0.4rem 1.1rem; display: flex; flex-direction: column; justify-content: center; gap: 0.2rem;
+    box-shadow: 0 -1px 4px rgba(0,0,0,0.06);
+    font-family: var(--font-mono); font-size: 0.62rem; color: var(--ink-soft); opacity: 0.85; line-height: 1.4;
+  }
+  .app-footer a { color: inherit; text-decoration: underline; text-decoration-color: var(--line); }
+  .app-footer a:hover { color: var(--accent); text-decoration-color: var(--accent); }
+
+  .leaflet-top.leaflet-left { top: calc(var(--header-h) + 16px); }
+  .leaflet-bottom { bottom: var(--footer-h) !important; }
+  .leaflet-bar a { color: var(--ink) !important; }
+  .leaflet-control-scale-line { font-family: var(--font-mono) !important; }
+
+  /* -------------------------------------------------------------------------------------- Sidebar */
+  .sidebar {
+    position: absolute; top: calc(var(--header-h) + 16px); right: 0; width: var(--sidebar-w); max-height: calc(100% - var(--header-h) - 30px - var(--footer-h)); z-index: 1000;
+    background: var(--panel); border: 1px solid var(--line); border-right: none; border-radius: 10px 0 0 10px;
+    box-shadow: -2px 2px 10px rgba(0,0,0,0.08);
+    overflow-y: auto; overflow-x: hidden;
+    transition: transform 0.22s ease;
+  }
+  .sidebar.collapsed { transform: translateX(100%); }
+
+  #sidebar-toggle {
+    position: absolute; z-index: 1001; top: 50%; right: var(--sidebar-w); transform: translateY(-50%);
+    width: 24px; height: 46px; border: 1px solid var(--line); border-right: none;
+    border-radius: 8px 0 0 8px; background: var(--panel); box-shadow: -2px 0 6px rgba(0,0,0,0.06);
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+    color: var(--ink-soft); transition: right 0.22s ease, color 0.15s;
+  }
+  #sidebar-toggle svg { width: 13px; height: 13px; }
+  #sidebar-toggle:hover { color: var(--accent); }
+  #sidebar-toggle.collapsed { right: 0; }
+  #sidebar-toggle { top: calc(var(--header-h) + (100% - var(--header-h) - var(--footer-h)) / 2); }
+
+  .sidebar-section { padding: 0.75rem 1.1rem; border-bottom: 1px solid var(--line); }
+  .sidebar-section:last-child { border-bottom: none; }
+  .sidebar-section .title {
+    font-family: var(--font-mono); font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--ink-soft); font-weight: 600; margin-bottom: 0.55rem;
+  }
+
+  .layer-list[hidden] { display: none; }
+
+  /* Layer rows -- same visual language as the earlier "tech-row" (icon + name + one-line
+     descriptor), now generic across both favourability and coverage layers. */
+  .layer-row {
+    appearance: none; width: 100%; text-align: left; border: 1px solid var(--line); background: var(--panel-alt);
+    border-radius: 7px; padding: 0.42rem 0.6rem; margin-bottom: 0.35rem; cursor: pointer;
+    display: flex; align-items: center; gap: 0.6rem;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .layer-row:last-child { margin-bottom: 0; }
+  .layer-row svg { width: 19px; height: 19px; flex: none; stroke: var(--ink-soft); transition: stroke 0.15s; }
+  .layer-row .name { font-weight: 700; font-size: 0.82rem; line-height: 1.25; }
+  .layer-row .descriptor { font-size: 0.68rem; color: var(--ink-soft); margin-top: 0.02rem; line-height: 1.2; }
+  .layer-row:hover { border-color: var(--accent-line); }
+  .layer-row.active { background: var(--accent); border-color: var(--accent); }
+  .layer-row.active svg { stroke: #fff; }
+  .layer-row.active .name, .layer-row.active .descriptor { color: #fff; }
+
+  /* Coverage disclosure -- tucked away below the favourability list, not a peer tab. */
+  .coverage-toggle {
+    appearance: none; width: 100%; text-align: left; background: none; border: none; cursor: pointer;
+    display: flex; align-items: center; gap: 0.35rem; padding: 0.5rem 0.1rem 0.2rem;
+    font-family: var(--font-mono); font-size: 0.68rem; color: var(--ink-soft);
+    text-transform: uppercase; letter-spacing: 0.04em; border-top: 1px dashed var(--line); margin-top: 0.5rem;
+  }
+  .coverage-toggle:hover { color: var(--accent); }
+  .coverage-toggle svg { width: 11px; height: 11px; transition: transform 0.15s; }
+  .coverage-toggle.open svg { transform: rotate(90deg); }
+  #coverage-rows { margin-top: 0.4rem; }
+  #coverage-rows[hidden] { display: none; }
+
+  /* -------------------------------------------------------------------------------- Display panel */
+  .opacity-card {
+    background: var(--panel-alt); border: 1px solid var(--line); border-radius: 8px;
+    padding: 0.55rem 0.7rem; margin-bottom: 0.5rem;
+  }
+  .opacity-card .row-label { display: flex; justify-content: space-between; align-items: center; font-size: 0.81rem; margin-bottom: 0.35rem; }
+  .opacity-card .row-label .val {
+    font-family: var(--font-mono); font-size: 0.76rem; color: var(--accent); font-weight: 600;
+    font-variant-numeric: tabular-nums; background: var(--accent-tint); padding: 0.05rem 0.4rem; border-radius: 3px;
+  }
+  .opacity-track { display: flex; align-items: center; gap: 0.5rem; }
+  .opacity-track svg { flex: none; color: var(--ink-soft); }
+  .opacity-track svg:first-child { width: 13px; height: 13px; opacity: 0.5; }
+  .opacity-track svg:last-child { width: 17px; height: 17px; }
+  input[type="range"] { width: 100%; accent-color: var(--accent); }
+
+  .display-row {
+    display: flex; align-items: center; gap: 0.55rem; padding: 0.4rem 0.1rem;
+    border-bottom: 1px solid var(--line);
+  }
+  .display-row:last-child { border-bottom: none; }
+  .display-row svg { width: 17px; height: 17px; flex: none; color: var(--ink-soft); }
+  .display-row .label { flex: 1; font-size: 0.82rem; line-height: 1.25; }
+  .display-row .label .helper { display: block; font-size: 0.67rem; color: var(--ink-soft); margin-top: 0.05rem; line-height: 1.2; }
+
+  .switch { position: relative; width: 34px; height: 20px; flex: none; }
+  .switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; z-index: 1; }
+  .switch .track { position: absolute; inset: 0; background: #d8d3c2; border-radius: 999px; transition: background 0.15s; }
+  .switch .thumb {
+    position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,0.25); transition: transform 0.15s;
+  }
+  .switch input:checked ~ .track { background: var(--accent); }
+  .switch input:checked ~ .thumb { transform: translateX(14px); }
+  .switch input:focus-visible ~ .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* -------------------------------------------------------------------------------------- Legend
+     Dynamic now -- a continuous gradient+ticks for diverging/sequential layers, or a row of
+     discrete swatches for categorical layers (only #legend-swatches or #legend-bar/#legend-ticks
+     is visible at a time, toggled in JS). */
+  #legend .bar { height: 9px; border-radius: 3px; }
+  #legend .ticks {
+    display: flex; justify-content: space-between; font-family: var(--font-mono);
+    font-size: 0.66rem; color: var(--ink-soft); margin-top: 0.3rem; font-variant-numeric: tabular-nums;
+  }
+  #legend .swatches { display: flex; gap: 0.4rem; }
+  /* [hidden] alone loses to the unconditional `display:flex` above (same/higher specificity) --
+     without this, toggling `.hidden = true` from JS leaves stale content from the previous
+     layer's legend visibly showing through the "hidden" element. Caught via screenshot:
+     switching from a categorical layer to a sequential one left the old categorical swatches
+     visible under the new ticks, and vice versa. */
+  #legend .ticks[hidden], #legend .swatches[hidden] { display: none; }
+  #legend .swatches .swatch { flex: 1; text-align: center; }
+  #legend .swatches .chip { height: 14px; border-radius: 3px; margin-bottom: 0.3rem; }
+  #legend .swatches .label { font-size: 0.62rem; color: var(--ink-soft); line-height: 1.25; }
+  #legend .note { font-size: 0.71rem; color: var(--ink-soft); margin-top: 0.4rem; line-height: 1.35; }
+  #legend .note strong { color: var(--ink); }
+
+  /* Pilot-site markers, 2026-09-25: swapped from a plain white dot to the PUSH-IT icon + an
+     always-visible name label (was hover-only via bindTooltip), on request, so sites read as
+     PUSH-IT's own without needing a click/hover to identify which is which. Reset Leaflet's
+     default .leaflet-div-icon box (white background + grey border) since divIcon assumes a plain
+     square icon by default. */
+  .site-marker-icon { background: none; border: none; display: flex; flex-direction: column; align-items: center; gap: 2px; pointer-events: auto; }
+  .site-marker-icon img {
+    width: 22px; height: 22px; border-radius: 50%; background: #fff; padding: 2px;
+    filter: drop-shadow(0 0 4px rgba(255,255,255,0.95)) drop-shadow(0 2px 3px rgba(0,0,0,0.45));
+  }
+  /* 2026-10-06: labels placed per site (left/right/above/below) so the clustered pilots do not overlap at the
+     European view; the label is positioned absolutely so the icon anchor is unchanged. */
+  .site-marker-icon { position: relative; }
+  .site-marker-label { position: absolute; }
+  .site-marker-label.pos-below { top: 27px; left: 50%; transform: translateX(-50%); }
+  .site-marker-label.pos-above { bottom: 27px; left: 50%; transform: translateX(-50%); }
+  .site-marker-label.pos-left  { right: 29px; top: 3px; }
+  .site-marker-label.pos-right { left: 29px; top: 3px; }
+  .site-marker-label {
+    font-family: var(--font-ui); font-weight: 700; font-size: 0.68rem; color: var(--ink); white-space: nowrap;
+    background: rgba(255,255,255,0.94); padding: 1px 6px; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.35);
+  }
+  .leaflet-tooltip.cell-tip { font-family: var(--font-mono); font-size: 0.72rem; font-variant-numeric: tabular-nums; padding: 2px 6px; }
+
+  .site-popup { font-family: var(--font-ui); font-size: 0.85rem; max-width: 230px; line-height: 1.45; }
+  .site-popup .name { font-weight: 700; font-size: 0.95rem; margin-bottom: 0.35rem; }
+  .site-popup .name.score { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .site-popup .tech-badge {
+    display: inline-block; font-family: var(--font-mono); font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.05em;
+    background: var(--accent-tint); color: var(--accent); border: 1px solid var(--accent-line);
+    padding: 0.12rem 0.4rem; border-radius: 3px; font-weight: 600; margin-bottom: 0.45rem;
+  }
+  .site-popup .desc { margin-bottom: 0.4rem; }
+  .site-popup .facts { font-size: 0.78rem; color: var(--ink-soft); margin-bottom: 0.6rem; }
+  .site-popup .link {
+    display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.78rem; font-weight: 600;
+    color: var(--accent); text-decoration: none; border-top: 1px solid var(--line);
+    padding-top: 0.5rem; width: 100%;
+  }
+  .site-popup .link:hover { text-decoration: underline; }
+
+  #loading {
+    position: absolute; z-index: 1500; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 0.8rem 1.2rem; font-size: 0.85rem; color: var(--ink-soft); box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    font-family: var(--font-mono);
+  }
+
+  /* ------------------------------------------------------------------------- Narrow screens (phones)
+     2026-10-06: below 700px the header keeps the logo, a short title and the EU emblem (mandatory),
+     the panel narrows to leave a strip of map visible and starts collapsed (see the script), and
+     the footer's height is measured in the script so the map controls sit above it. */
+  @media (max-width: 700px) {
+    :root { --header-h: 48px; --sidebar-w: min(300px, calc(100vw - 40px)); }
+    .app-header { padding: 0 0.6rem; gap: 0.45rem; }
+    .app-header img.brand-mark { height: 26px; }
+    .app-header h1 { font-size: 0.86rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .app-header h1 .long { display: none; }
+    .app-header .sub { display: none; }
+    .app-header img.partner-mark { height: 24px; margin-left: auto; }
+    .app-header a:has(img.partner-mark) { display: none; }
+    .app-footer { padding: 0.3rem 0.6rem; font-size: 0.52rem; line-height: 1.3; }
+    .leaflet-popup-content { max-width: 70vw; }
+    .leaflet-control-attribution { font-size: 9px !important; max-width: calc(100vw - 110px); white-space: normal; line-height: 1.3; }
+    .sidebar { max-height: calc(100% - var(--header-h) - 44px - var(--footer-h)); }
+  }
+</style>
+</head>
+<body>
+
+<div class="app-header">
+  <a href="https://www.push-it-thermalstorage.eu/" target="_blank" rel="noopener">
+    <img class="brand-mark" src="assets/pushit_icon.png" alt="PUSH-IT">
+  </a>
+  <h1>PUSH-IT · UTES<span class="long"> site</span> favourability</h1>
+  <span class="sub">Horizon Europe · Grant 101096566 · Task 4.5 (D4.3)</span>
+  <img class="partner-mark" src="assets/eu_funded_by.png" alt="Funded by the European Union">
+  <a href="https://www.unige.ch/ge-rgba/" target="_blank" rel="noopener">
+    <img class="partner-mark" src="assets/unige_logo.jpeg" alt="University of Geneva">
+  </a>
+</div>
+
+<div id="map"></div>
+<div id="loading">Loading favourability surface…</div>
+
+<button id="sidebar-toggle" aria-label="Collapse panel" title="Collapse panel">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+</button>
+<aside class="sidebar" id="sidebar">
+
+  <section class="sidebar-section" id="layer-control">
+    <div class="title">Layers</div>
+    <div class="layer-list" id="layer-list-favourability"></div>
+    <button class="coverage-toggle" id="coverage-toggle">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>
+      Data coverage layers (2)
+    </button>
+    <div id="coverage-rows" hidden></div>
+  </section>
+
+  <section class="sidebar-section" id="display-control">
+    <div class="title">Display</div>
+
+    <div class="opacity-card">
+      <div class="row-label"><span id="opacity-label">Layer opacity</span><span class="val" id="opacity-val">85%</span></div>
+      <div class="opacity-track">
+        <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>
+        <input type="range" id="opacity-slider" min="20" max="100" value="85">
+        <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>
+      </div>
+    </div>
+
+    <label class="display-row">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C7.6 2 4 5.6 4 10c0 6 8 12 8 12s8-6 8-12c0-4.4-3.6-8-8-8z"/><circle cx="12" cy="10" r="2.5"/></svg>
+      <span class="label">City labels<span class="helper">Esri place-name overlay</span></span>
+      <span class="switch"><input type="checkbox" id="toggle-labels" checked><span class="track"></span><span class="thumb"></span></span>
+    </label>
+    <label class="display-row">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4M17 12h4M12 3v4M12 17v4"/><circle cx="12" cy="12" r="4"/></svg>
+      <span class="label">Country borders<span class="helper">Outline overlay</span></span>
+      <span class="switch"><input type="checkbox" id="toggle-borders" checked><span class="track"></span><span class="thumb"></span></span>
+    </label>
+    <label class="display-row">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="9" y1="4" x2="9" y2="20"/><line x1="15" y1="4" x2="15" y2="20"/></svg>
+      <span class="label">Cell grid lines<span class="helper">Outline each cell</span></span>
+      <span class="switch"><input type="checkbox" id="toggle-grid" checked><span class="track"></span><span class="thumb"></span></span>
+    </label>
+    <label class="display-row">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
+      <span class="label">Colorblind-safe colors<span class="helper">Purple–yellow scale</span></span>
+      <span class="switch"><input type="checkbox" id="toggle-cvd"><span class="track"></span><span class="thumb"></span></span>
+    </label>
+  </section>
+
+  <section class="sidebar-section" id="legend">
+    <div class="title" id="legend-title">Favourability score</div>
+    <div class="bar" id="legend-bar"></div>
+    <div class="ticks" id="legend-ticks"></div>
+    <div class="swatches" id="legend-swatches" hidden></div>
+    <div class="note">Hover a cell for its value, click for details and country. Click a labeled site marker for one of PUSH-IT's own pilot sites.</div>
+    <div class="note">Full methodology and site-level results: see the SMCA scientific report.</div>
+  </section>
+
+</aside>
+
+<div class="app-footer">
+  <span><a href="https://www.push-it-thermalstorage.eu/" target="_blank" rel="noopener">PUSH-IT</a> · <a href="https://www.unige.ch/ge-rgba/" target="_blank" rel="noopener">University of Geneva, Department of Earth Sciences, GE-RGBA Group</a>, 2026. Makhloufi Y. &amp; Moscariello A.</span>
+  <span>Funded by the European Union. Views and opinions expressed are however those of the author(s) only and do not necessarily reflect those of the European Union or CINEA. Neither the European Union nor CINEA can be held responsible for them.</span>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/topojson-client@3/dist/topojson-client.min.js"></script>
+<script>
+  /* ============================================================================================
+     Layer registry -- every toggleable data layer, its group (favourability/input/coverage),
+     row icon, one-line descriptor, color-ramp type, favourability direction (for sequential
+     layers, so the ramp orients "physically favourable end = visually favourable end" the same
+     way regardless of whether the raw KPI wants a high or low number), and the explanatory note
+     reused in both the legend and the cell popup ("facts" line) -- same content, same place,
+     deliberately not duplicated with different wording in two spots.
+     ============================================================================================ */
+  const ICONS = {
+    droplet: '<path d="M12 2.5c3.2 4 6 7.7 6 11a6 6 0 1 1-12 0c0-3.3 2.8-7 6-11z"/>',
+    hotDroplet: '<path d="M12 2.5c3.2 4 6 7.7 6 11a6 6 0 1 1-12 0c0-3.3 2.8-7 6-11z"/><path d="M12 9.5c1.1 1.7 2 3.1 2 4.4a2 2 0 1 1-4 0c0-1.3.9-2.7 2-4.4z" fill="currentColor" stroke="none"/>',
+    uloop: '<path d="M8 3v13a4 4 0 0 0 8 0V3"/><line x1="5.5" y1="3" x2="10.5" y2="3"/><line x1="13.5" y1="3" x2="18.5" y2="3"/>',
+    mine: '<path d="M4 21V11a8 8 0 0 1 16 0v10"/><line x1="4" y1="21" x2="20" y2="21"/>',
+    bolt: '<path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z"/>',
+    depth: '<path d="M12 3v14"/><path d="M12 17l-4-4"/><path d="M12 17l4-4"/><line x1="4" y1="21" x2="20" y2="21"/>',
+    network: '<circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/><circle cx="12" cy="5" r="2"/><line x1="11" y1="7" x2="7" y2="16"/><line x1="13" y1="7" x2="17" y2="16"/>',
+    wave: '<path d="M2 9c2-2 4-2 6 0s4 2 6 0 4-2 6 0"/><path d="M2 16c2-2 4-2 6 0s4 2 6 0 4-2 6 0"/>',
+    shield: '<path d="M12 2.5l8 3.5v5.5c0 5-3.4 8-8 9.5-4.6-1.5-8-4.5-8-9.5V6l8-3.5z"/>',
+    leaf: '<path d="M20 4C10 4 4 10 4 20c10 0 16-6 16-16z"/><line x1="4" y1="20" x2="12" y2="12"/>',
+    people: '<circle cx="8.5" cy="8" r="2.8"/><path d="M3 19c0-3.5 2.5-5.5 5.5-5.5s5.5 2 5.5 5.5"/><circle cx="17" cy="8.5" r="2.2"/><path d="M14.5 13.2c2.8.3 4.5 2.2 4.5 5.8"/>',
+    layers: '<polygon points="12 2 22 8 12 14 2 8 12 2"/><polyline points="2 13 12 19 22 13"/>',
+    thermo: '<path d="M12 14V4a2 2 0 1 0-4 0v10a4 4 0 1 0 4 0z"/>',
+    grid: '<line x1="4" y1="9" x2="20" y2="9"/><line x1="4" y1="15" x2="20" y2="15"/><line x1="9" y1="4" x2="9" y2="20"/><line x1="15" y1="4" x2="15" y2="20"/>',
+    venn: '<circle cx="9" cy="12" r="7"/><circle cx="15" cy="12" r="7"/>',
+  };
+
+  const LAYERS = {
+    ates: { group: "favourability", name: "ATES", descriptor: "Aquifer, low temperature", icon: ICONS.droplet, ramp: "favourability",
+      note: "Low-temperature ATES favourability, relative to the rest of the study area. Layers, by weight: reservoir quality, groundwater flow, energy demand matching, depth, population density, connection to DHN, temperature at depth." },
+    htates: { group: "favourability", name: "HT-ATES", descriptor: "Aquifer, high temperature", icon: ICONS.hotDroplet, ramp: "favourability",
+      note: "High-temperature ATES favourability, relative to the rest of the study area. Layers, by weight: reservoir quality, groundwater flow, energy demand matching, depth, population density, connection to DHN, heat-source proximity, temperature at depth." },
+    btes: { group: "favourability", name: "BTES", descriptor: "Borehole heat exchangers", icon: ICONS.uloop, ramp: "favourability",
+      note: "BTES favourability, relative to the rest of the study area. Layers, by weight: energy demand matching, connection to DHN, depth, population density, thermal conductivity, groundwater flow." },
+    mtes: { group: "favourability", name: "MTES", descriptor: "Flooded mine workings", icon: ICONS.mine, ramp: "favourability",
+      note: "MTES favourability, relative to the rest of the study area. Layers, by weight: mine proximity, groundwater flow, energy demand matching, connection to DHN, depth, population density." },
+
+    kpi_count: { group: "coverage", name: "KPI count", descriptor: "Valid layers per cell (of 8)", icon: ICONS.grid, ramp: "sequential-neutral",
+      format: v => `${v.toFixed(1)} / 8`, domain: [2, 8], fixedDomain: true, ticks: [2, 4, 6, 8],
+      note: "Number of the 8 input layers with valid data in this 10 km cell (mean of its 1 km cells). A data-completeness check, not a favourability score." },
+    low_coverage: { group: "coverage", name: "Data low coverage", descriptor: "Energy demand × Depth footprint", icon: ICONS.venn, ramp: "categorical",
+      domain: [0, 3], labels: ["Neither layer has data", "Energy demand matching only", "Depth only", "Both layers have data"], colors: ["#e8e5da", "#f4a582", "#92c5de", "#2166ac"],
+      format: (v, meta) => meta.labels[Math.max(0, Math.min(meta.labels.length - 1, Math.round(v)))],
+      note: "Where the two least complete input layers, energy demand matching and depth, have data. Each 10 km area shows the most common category among its 1 km cells." },
+  };
+
+  // ------------------------------------------------------------------------------------ Color ramps
+  // Sequential layers (all 8 input KPIs + KPI count) use ONE neutral light->dark ramp, not a
+  // red-green favourable/unfavourable one (2026-09-08, on request): red on a raw physical
+  // quantity like Energy demand or Population density reads as "bad", which is misleading --
+  // these layers show magnitude, not a favourability verdict (that judgment is the composites'
+  // job, §diverging below). A single-hue ramp also fixes a real legibility problem: sparse
+  // high-population cells were previously near-invisible green flecks in a "sea" of red; a light
+  // cream -> dark blue ramp makes hotspots pop as the darkest, most saturated cells instead.
+  const NEUTRAL_LOW = [247, 243, 233], NEUTRAL_HIGH = [4, 68, 97];   // near-white cream -> deep brand-blue
+  const FAVOURABLE_CVD = [179, 88, 6], UNFAVOURABLE_CVD = [69, 117, 180];   // colorblind-safe pairing for the neutral input-KPI ramp's CVD toggle
+
+  // Favourability composites: went through 4 rounds on direct feedback from the user and Serge
+  // (WP4 comms). Round 1 (2026-09-25) replaced the old red-yellow-green DIVERGING ramp with a
+  // single-hue cream->orange SEQUENTIAL one -- fixed the "traffic light" misread (red as a literal
+  // "no-go" signal, not "lower relative favourability"), but lost too much perceptual contrast:
+  // a single hue can't show as much range as a multi-hue scale, so most of the map read as one
+  // flat mid-tone. Round 2 (same day): Viridis (purple -> blue -> teal -> green -> yellow), the
+  // standard modern replacement for red-green "jet"-style colormaps -- multi-hue, colorblind-safe
+  // by construction, no red/green endpoints -- but rejected as too dark/heavy at the low end.
+  // Round 3 (same day): brand-anchored multi-hue, blue -> teal -> gold -> PUSH-IT orange (#ef5b22
+  // at the high end), stop positions widened toward the top so orange dominates more of the range
+  // and separates clearly from the gold midpoint, rather than 0/25/50/75/100 even spacing.
+  // Round 4 (same day): pushed further toward orange, done at the time by shifting gold from 50
+  // to 32 -- reverted immediately (round 5) on correction that the midpoint hue must stay AT 50,
+  // since its position is meant to encode the actual value, not just look balanced. Also wired
+  // the "Colorblind-safe colors" toggle back up -- it had gone silently inert for this layer when
+  // the diverging->multi-hue switch happened (a real reported bug: the toggle visibly did
+  // nothing). Rather than invent an untested palette for the CVD path, it falls back to Viridis
+  // from round 2 -- already simulated and confirmed to hold up under protanopia/deuteranopia/
+  // tritanopia, so the toggle has a genuine, verified effect instead of a guessed one.
+  // Round 5 (same day): gold restored to v=50. To still give orange the top half of the range to
+  // dominate (the actual goal of round 4) without moving the midpoint, added a 6th stop instead --
+  // a darker blue anchor at 0 -- rather than compressing existing stops.
+  const FAV_STOPS = [
+    [0,   [8, 48, 107]],     // dark blue
+    [15,  [49, 130, 189]],   // medium blue
+    [30,  [102, 194, 165]],  // teal
+    [50,  [255, 237, 160]],  // pale gold -- the true midpoint
+    [75,  [250, 150, 70]],   // orange-leaning amber
+    [100, [239, 91, 34]],    // #ef5b22, PUSH-IT accent orange
+  ];
+  const FAV_STOPS_CVD = [
+    [0,   [68, 1, 84]], [25, [59, 82, 139]], [50, [33, 144, 140]], [75, [93, 201, 99]], [100, [253, 231, 37]],
+  ];   // Viridis (round 2) -- simulation-verified colorblind-safe fallback
+
+  let useCVDPalette = false;
+
+  function lerp(c0, c1, t) { return [0,1,2].map(i => Math.round(c0[i] + t * (c1[i] - c0[i]))); }
+  function rgbStr(c) { return `rgb(${c[0]},${c[1]},${c[2]})`; }
+
+  function stopsColor(v, stops) {
+    v = Math.max(0, Math.min(100, v));
+    for (let i = 0; i < stops.length - 1; i++) {
+      const [v0, c0] = stops[i], [v1, c1] = stops[i + 1];
+      if (v >= v0 && v <= v1) return rgbStr(lerp(c0, c1, (v - v0) / (v1 - v0)));
+    }
+    return "#cccccc";
+  }
+  function favourabilityColor(v) {
+    return stopsColor(v, useCVDPalette ? FAV_STOPS_CVD : FAV_STOPS);
+  }
+  // Neutral sequential ramp: low raw value -> light, high raw value -> dark, always -- no
+  // favourability judgment encoded in color (a layer's own favourable direction is explained in
+  // its note/popup text instead, see LAYERS above). useLog applies log1p before normalizing --
+  // for the 3 heavily right-skewed layers (energy demand, population density, depth), matching
+  // the same log1p transform already used when these KPIs are normalized for the actual
+  // composite scoring (mca/EU_SCALE_METHODOLOGY.md) -- without it a few outlier cells would wash
+  // out the visible color range for everything else.
+  function sequentialColor(v, domain, useLog) {
+    let [lo, hi] = domain, x = v, xlo = lo, xhi = hi;
+    if (useLog) { x = Math.log1p(Math.max(0, v)); xlo = Math.log1p(Math.max(0, lo)); xhi = Math.log1p(Math.max(0, hi)); }
+    let t = xhi > xlo ? (x - xlo) / (xhi - xlo) : 0;
+    t = Math.max(0, Math.min(1, t));
+    const lowC = useCVDPalette ? UNFAVOURABLE_CVD : NEUTRAL_LOW, highC = useCVDPalette ? FAVOURABLE_CVD : NEUTRAL_HIGH;
+    return rgbStr(lerp(lowC, highC, t));
+  }
+  function categoricalColor(v, meta) {
+    return meta.colors[Math.max(0, Math.min(meta.colors.length - 1, Math.round(v)))];
+  }
+
+  const domains = {}; // per-layer [min,max], computed from each layer's own data on first load (fixed layers use meta.domain instead)
+
+  function colorForLayer(slug, v) {
+    if (v === null || v === undefined || isNaN(v)) return "#cccccc";
+    const meta = LAYERS[slug];
+    if (meta.ramp === "favourability") return favourabilityColor(v);
+    if (meta.ramp === "categorical") return categoricalColor(v, meta);
+    const domain = (meta.fixedDomain && meta.domain) || domains[slug] || meta.domain || [0, 1];
+    if (meta.ramp === "sequential") return sequentialColor(v, domain, false);
+    if (meta.ramp === "sequential-log") return sequentialColor(v, domain, true);
+    if (meta.ramp === "sequential-neutral") return sequentialColor(v, domain, false);
+    return "#cccccc";
+  }
+  function formatValue(slug, v) {
+    const meta = LAYERS[slug];
+    if (meta.ramp === "favourability") return `${v.toFixed(1)} / 100`;
+    return meta.format ? meta.format(v, meta) : v.toFixed(1);
+  }
+
+  // ---------------------------------------------------------------------------------------- Legend
+  function updateLegend(slug) {
+    const meta = LAYERS[slug];
+    document.getElementById("legend-title").textContent = meta.ramp === "favourability" ? "Favourability score" : meta.name;
+    const bar = document.getElementById("legend-bar"), ticks = document.getElementById("legend-ticks"), swatches = document.getElementById("legend-swatches");
+
+    if (meta.ramp === "categorical") {
+      bar.hidden = true; ticks.hidden = true; swatches.hidden = false;
+      swatches.innerHTML = meta.labels.map((label, i) =>
+        `<div class="swatch"><div class="chip" style="background:${meta.colors[i]}"></div><div class="label">${label}</div></div>`).join("");
+      return;
+    }
+    bar.hidden = false; ticks.hidden = false; swatches.hidden = true;
+
+    if (meta.ramp === "favourability") {
+      const stops = useCVDPalette ? FAV_STOPS_CVD : FAV_STOPS;
+      bar.style.background = `linear-gradient(90deg, ${stops.map(([v,c]) => `${rgbStr(c)} ${v}%`).join(", ")})`;
+      ticks.innerHTML = ["0","25","50","75","100"].map(v => `<span>${v}</span>`).join("");
+      return;
+    }
+
+    const domain = (meta.fixedDomain && meta.domain) || domains[slug] || meta.domain || [0, 1];
+    const [lo, hi] = domain;
+    const useLog = meta.ramp === "sequential-log";
+    // Always light (low raw value) -> dark (high raw value), same ramp/orientation for every
+    // sequential layer -- no favourability judgment encoded in the gradient direction.
+    const lowC = useCVDPalette ? UNFAVOURABLE_CVD : NEUTRAL_LOW, highC = useCVDPalette ? FAVOURABLE_CVD : NEUTRAL_HIGH;
+    bar.style.background = `linear-gradient(90deg, ${rgbStr(lowC)} 0%, ${rgbStr(highC)} 100%)`;
+    // 5 tick values evenly spaced in the space the ramp is actually computed in (log or linear),
+    // then mapped back to real units so the legend always reads in the layer's native units.
+    const steps = [0, 0.25, 0.5, 0.75, 1];
+    const tickVals = steps.map(t => {
+      if (!useLog) return lo + t * (hi - lo);
+      const xlo = Math.log1p(Math.max(0, lo)), xhi = Math.log1p(Math.max(0, hi));
+      return Math.expm1(xlo + t * (xhi - xlo));
+    });
+    if (meta.ticks) { ticks.innerHTML = meta.ticks.map(v => `<span>${v}</span>`).join(""); return; }
+    ticks.innerHTML = tickVals.map(v => `<span>${meta.format ? meta.format(v, meta) : v.toFixed(1)}</span>`).join("");
+  }
+
+  // -------------------------------------------------------------------------------------------- Map
+  const map = L.map("map", { zoomControl: true, minZoom: 3, maxZoom: 10 }).setView([50.5, 10], 4);
+
+  // Basemap: always on (2026-09-08 -- its own toggle was replaced by a City labels toggle
+  // instead, see below), no longer user-removable.
+  L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}", {
+    attribution: 'Basemap &copy; <a href="https://www.esri.com">Esri</a>: Esri, HERE, Garmin, FAO, NOAA, USGS',
+    maxZoom: 16,
+  }).addTo(map);
+
+  // City labels: Esri's own official reference/labels overlay, designed specifically to sit on
+  // top of the Light Gray Base tiles above (place names, transparent background, same visual
+  // style) -- confirmed working live before adding (real city names render at the expected
+  // zoom levels: Paris, Amsterdam, Rennes, etc.), no separate city dataset needed. On by default.
+  // Own pane (z-index 450, between the default overlayPane 400 -- favourability fill/borders --
+  // and markerPane 600 -- pilot sites) so labels stay readable over the colored data but pilot
+  // markers still render on top of label text, not the other way round.
+  map.createPane("labelsPane").style.zIndex = 450;
+  const labelLayer = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}", {
+    maxZoom: 16, pane: "labelsPane",
+  }).addTo(map);
+
+  L.control.scale({ position: "bottomleft", imperial: false, maxWidth: 150 }).addTo(map);
+
+  const renderer = L.canvas({ padding: 0.3 });
+  let fillOpacity = 0.85;
+  let showGrid = true;   // cell outline toggle -- fill/hover/tooltip stay on regardless, see styleForActive
+  let activeLayerSlug = null;
+  let current = null;
+  const loadedLayers = {}; // slug -> L.geoJSON, populated lazily on first selection
+
+  // Black cell border, put back on request (2026-09-08) after briefly removing it -- a fixed
+  // thin black outline, not the same-color anti-gap stroke the original 2026-09-01 build used.
+  // Its own opacity is independent of the fill-opacity slider (stays legible even at low fill
+  // opacity) -- and it happens to still serve that original anti-gap purpose too, verified at
+  // the AOI's northern edge (Svalbard/northern Norway zoomed screenshot) with weight:0 shortly
+  // before this: no seam gaps appeared at this cell size/zoom range either way.
+  const CELL_BORDER_COLOR = "#1c1b13", CELL_BORDER_OPACITY = 0.35, CELL_BORDER_WEIGHT = 0.5;
+
+  function styleForActive(feature) {
+    const c = colorForLayer(activeLayerSlug, feature.properties.v);
+    return { fillColor: c, fillOpacity, stroke: showGrid, color: CELL_BORDER_COLOR, weight: CELL_BORDER_WEIGHT, opacity: CELL_BORDER_OPACITY };
+  }
+
+  function rayCastRing(ring, lon, lat) {
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [xi, yi] = ring[i], [xj, yj] = ring[j];
+      const intersects = ((yi > lat) !== (yj > lat)) && (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi);
+      if (intersects) inside = !inside;
+    }
+    return inside;
+  }
+  function pointInPolygonGeom(geom, lon, lat) {
+    const polys = geom.type === "MultiPolygon" ? geom.coordinates : [geom.coordinates];
+    return polys.some(rings => rings.reduce((acc, ring) => acc !== rayCastRing(ring, lon, lat), false));
+  }
+  function countryAt(lon, lat) {
+    if (!countryBordersData) return null;
+    const hit = countryBordersData.features.find(f => pointInPolygonGeom(f.geometry, lon, lat));
+    return hit ? hit.properties.NAME_ENGL : null;
+  }
+
+  function cellPopupHtml(slug, v, lon, lat) {
+    const meta = LAYERS[slug];
+    const country = countryAt(lon, lat) || "outside the mapped country set";
+    return `
+      <div class="site-popup">
+        <div class="name score">${formatValue(slug, v)}</div>
+        <div class="tech-badge">${meta.name}</div>
+        <div class="desc">${country} · ${lat.toFixed(2)}°N, ${lon.toFixed(2)}°E</div>
+        <div class="facts">${meta.note}</div>
+      </div>`;
+  }
+  function onEachCell(slug) {
+    return (feature, layer) => {
+      const v = feature.properties.v;
+      if (v !== null && v !== undefined) {
+        layer.bindTooltip(formatValue(slug, v), { className: "cell-tip", sticky: true, opacity: 0.92 });
+      }
+      layer.on("mouseover", () => {
+        layer.setStyle({ stroke: true, weight: 2, color: "#1c1b13", fillOpacity: Math.min(1, fillOpacity + 0.1) });
+        layer.bringToFront();
+        map.getContainer().style.cursor = "pointer";
+      });
+      layer.on("mouseout", () => {
+        layer.setStyle(styleForActive(feature));
+        map.getContainer().style.cursor = "";
+      });
+      layer.on("click", e => {
+        const c = e.latlng;
+        if (v === null || v === undefined) return;
+        L.popup({ maxWidth: 260 }).setLatLng(c).setContent(cellPopupHtml(slug, v, c.lng, c.lat)).openOn(map);
+      });
+    };
+  }
+
+  // Lazy load: a layer's TopoJSON is only fetched the first time it's actually selected, not
+  // eagerly for all 15 on page load (closes a gap flagged, deliberately deferred, when the
+  // TopoJSON per-layer-vs-combined decision was made). The default layer (ATES) is fetched
+  // immediately so the map isn't empty on first paint.
+  function selectLayer(slug) {
+    document.querySelectorAll(".layer-row").forEach(b => b.classList.toggle("active", b.dataset.layer === slug));
+    activeLayerSlug = slug;
+    document.getElementById("opacity-label").textContent = `${LAYERS[slug].name} opacity`;
+
+    if (loadedLayers[slug]) {
+      showLayer(slug);
+      return;
+    }
+    document.getElementById("loading").textContent = `Loading ${LAYERS[slug].name}…`;
+    document.getElementById("loading").style.display = "block";
+    fetch(`data/${slug}_10km.topojson`)
+      .then(r => r.json())
+      .then(topo => topojson.feature(topo, topo.objects[slug]))
+      .then(gj => {
+        if (!(LAYERS[slug].ramp === "categorical" || LAYERS[slug].domain)) {
+          const vals = gj.features.map(f => f.properties.v).filter(v => v !== null && v !== undefined);
+          domains[slug] = [Math.min(...vals), Math.max(...vals)];
+        }
+        loadedLayers[slug] = L.geoJSON(gj, { style: styleForActive, renderer, onEachFeature: onEachCell(slug) });
+        document.getElementById("loading").style.display = "none";
+        if (activeLayerSlug === slug) showLayer(slug);
+      });
+  }
+
+  function showLayer(slug) {
+    if (current) map.removeLayer(current);
+    current = loadedLayers[slug];
+    current.setStyle(styleForActive);
+    current.addTo(map).bringToFront();
+    bordersLayer && bordersLayer.bringToFront();
+    sitesLayer && sitesLayer.bringToFront();
+    updateLegend(slug);
+  }
+
+  // ---------------------------------------------------------------------------- Sidebar: build rows
+  function makeRow(slug) {
+    const meta = LAYERS[slug];
+    const btn = document.createElement("button");
+    btn.className = "layer-row";
+    btn.dataset.layer = slug;
+    btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${meta.icon}</svg>
+      <div><div class="name">${meta.name}</div><div class="descriptor">${meta.descriptor}</div></div>`;
+    btn.addEventListener("click", () => selectLayer(slug));
+    return btn;
+  }
+  const favList = document.getElementById("layer-list-favourability");
+  const coverageRows = document.getElementById("coverage-rows");
+  Object.keys(LAYERS).forEach(slug => {
+    const group = LAYERS[slug].group;
+    if (group === "favourability") favList.appendChild(makeRow(slug));
+    else if (group === "coverage") coverageRows.appendChild(makeRow(slug));
+  });
+
+  const coverageToggle = document.getElementById("coverage-toggle");
+  coverageToggle.addEventListener("click", () => {
+    const open = coverageToggle.classList.toggle("open");
+    coverageRows.hidden = !open;
+  });
+
+  // ----------------------------------------------------------------------------- Borders / markers
+  let bordersLayer;
+  let countryBordersData;
+  fetch("data/country_borders.geojson")
+    .then(r => r.json())
+    .then(gj => {
+      countryBordersData = gj;
+      bordersLayer = L.geoJSON(gj, { style: { fill: false, color: "#2a2721", weight: 0.8, opacity: 0.55, interactive: false } });
+      if (document.getElementById("toggle-borders").checked) {
+        bordersLayer.addTo(map);
+        bordersLayer.bringToFront();
+        sitesLayer && sitesLayer.bringToFront();
+      }
+    });
+
+  function sitePopupHtml(p) {
+    const link = p.project_url ? `<a class="link" href="${p.project_url}" target="_blank" rel="noopener">View pilot page ↗</a>` : "";
+    return `
+      <div class="site-popup">
+        <div class="name">${p.name}</div>
+        <div class="tech-badge">${p.technology}</div>
+        <div class="desc">${p.description}</div>
+        <div class="facts">${p.characteristics}</div>
+        ${link}
+      </div>`;
+  }
+
+  const LABEL_POS = { "Delft": "left", "Bochum": "above", "Darmstadt": "below", "Berlin": "right", "Litoměřice": "right", "United Downs": "left" };
+  let sitesLayer;
+  fetch("data/pilot_sites.geojson")
+    .then(r => r.json())
+    .then(gj => {
+      sitesLayer = L.geoJSON(gj, {
+        pointToLayer: (feature, latlng) => L.marker(latlng, {
+          icon: L.divIcon({
+            className: "site-marker-icon",
+            html: `<img src="assets/pushit_icon.png" alt=""><span class="site-marker-label pos-${LABEL_POS[feature.properties.name] || "below"}">${feature.properties.name}</span>`,
+            iconSize: null, iconAnchor: [11, 11],
+          }),
+        }).bindPopup(sitePopupHtml(feature.properties), { maxWidth: 260 }),
+      }).addTo(map);
+    });
+
+  // ------------------------------------------------------------------------------- Display wiring
+  const opacitySlider = document.getElementById("opacity-slider");
+  const opacityVal = document.getElementById("opacity-val");
+  opacitySlider.addEventListener("input", e => {
+    fillOpacity = Number(e.target.value) / 100;
+    opacityVal.textContent = `${e.target.value}%`;
+    if (current) current.setStyle(styleForActive);
+  });
+
+  document.getElementById("toggle-borders").addEventListener("change", e => {
+    if (!bordersLayer) return;
+    if (e.target.checked) { bordersLayer.addTo(map); bordersLayer.bringToFront(); sitesLayer && sitesLayer.bringToFront(); }
+    else map.removeLayer(bordersLayer);
+  });
+  document.getElementById("toggle-labels").addEventListener("change", e => {
+    if (e.target.checked) labelLayer.addTo(map); else map.removeLayer(labelLayer);
+  });
+  document.getElementById("toggle-cvd").addEventListener("change", e => {
+    useCVDPalette = e.target.checked;
+    if (activeLayerSlug) updateLegend(activeLayerSlug);
+    if (current) current.setStyle(styleForActive);
+  });
+  document.getElementById("toggle-grid").addEventListener("change", e => {
+    showGrid = e.target.checked;
+    if (current) current.setStyle(styleForActive);
+  });
+
+  const sidebar = document.getElementById("sidebar");
+  const sidebarToggle = document.getElementById("sidebar-toggle");
+  sidebarToggle.addEventListener("click", () => {
+    const collapsed = sidebar.classList.toggle("collapsed");
+    sidebarToggle.classList.toggle("collapsed", collapsed);
+    sidebarToggle.querySelector("svg").style.transform = collapsed ? "rotate(180deg)" : "rotate(0deg)";
+    sidebarToggle.title = collapsed ? "Expand panel" : "Collapse panel";
+  });
+
+  // The footer wraps to more lines on narrow screens: keep --footer-h equal to its real height
+  // so the map controls and the panel never sit under it.
+  const footer = document.querySelector(".app-footer");
+  new ResizeObserver(() => document.documentElement.style.setProperty("--footer-h", footer.offsetHeight + "px")).observe(footer);
+  // On phones the panel would cover the map: start with it collapsed.
+  if (window.matchMedia("(max-width: 700px)").matches) sidebarToggle.click();
+
+  // Default layer on load: ATES.
+  selectLayer("ates");
+</script>
+</body>
+</html>
