@@ -210,7 +210,9 @@
   }
   /* 2026-10-06: labels placed per site (left/right/above/below) so the clustered pilots do not overlap at the
      European view; the label is positioned absolutely so the icon anchor is unchanged. */
-  .site-marker-icon { position: relative; }
+  /* 2026-11-02: no position override here. Leaflet's own absolute positioning of .leaflet-marker-icon already
+     anchors the label; an earlier `position: relative` stacked the markers in normal flow and pushed each one
+     further south (United Downs ended up at sea). */
   .site-marker-label { position: absolute; }
   .site-marker-label.pos-below { top: 27px; left: 50%; transform: translateX(-50%); }
   .site-marker-label.pos-above { bottom: 27px; left: 50%; transform: translateX(-50%); }
