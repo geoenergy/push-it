@@ -33,6 +33,16 @@ The favourability composites are built from, and the map's basemap/context layer
 
 Full source-by-source access dates, methods, and exact usage are documented in the project's internal source log and are summarized in the PUSH-IT SMCA scientific report.
 
+## Maintaining this site
+
+This repository is published by GitHub Pages at **https://push-it.geoenergy.ch** from the `main` branch. Any change pushed to `main` goes live in 1–2 minutes; there is no build step.
+
+- **Quick fix:** open the file on github.com (usually `index.html`), click the pencil icon, edit, and commit to `main`.
+- **Larger change:** `git clone` the repo, preview with `python3 -m http.server 8000`, then commit and `git push`.
+- **Do not delete the `CNAME` file**: it tells GitHub Pages which address serves this site.
+
+Members of the geoenergy organization: the full guide (architecture, DNS, troubleshooting, who has access) is on the [organization page](https://github.com/geoenergy).
+
 ## Rights
 
 © 2026 University of Geneva, PUSH-IT project. All rights reserved.
